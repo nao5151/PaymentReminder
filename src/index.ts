@@ -19,49 +19,141 @@ if (!SHEET_ID) {
 //   "MAIL_ADDRESS"
 // );
 
-export enum Category {
-  Monthly = "Monthly",
-  Yearly = "Yearly",
-}
+// スプレッドシートで使っている文字と合わせる
+const REPEAT_UNIT = {
+  month: "month",
+  year: "year",
+} as const;
+type REPEAT_UNIT = typeof REPEAT_UNIT[keyof typeof REPEAT_UNIT];
 
-class Payment {
+const INDEXES = {
+  timestamp: 0,
+  category: 1,
+  title: 2,
+  amount: 3,
+  start: 4,
+  end: 5,
+  repeatValue: 6,
+  repeatUnit: 7,
+  memo: 8,
+  next: 9,
+} as const;
+type INDEXES = typeof INDEXES[keyof typeof INDEXES];
+
+type RowType = [
+  Date, // タイムスタンプ
+  string, // category
+  string, // title
+  number, // amount
+  Date, // start
+  Date | undefined, // end
+  number, // repeatValue
+  REPEAT_UNIT, // repeatUnit
+  string | undefined, // memo
+  Date | undefined // next
+];
+
+export class Payment {
   constructor(
-    public title: string,
-    public amount: number,
-    public paymentDate: Date,
-    public paymentPeriod?: Date
+    public readonly timestamp: Date,
+    public readonly category: string,
+    public readonly title: string,
+    public readonly amount: number,
+    public readonly start: Date,
+    public readonly end: Date | undefined,
+    public readonly repeatValue: number,
+    public readonly repeatUnit: REPEAT_UNIT,
+    public readonly memo: string | undefined,
+    public next: Date | undefined
   ) {}
 
-  static get(from: Date, to: Date): Payment[] {
-    const sheets = SpreadsheetApp.openById(SHEET_ID!).getSheets();
-    const sheet = sheets[0];
-    // |category|title|amount|paymentDate|paymentPeriod|
-    const values = sheet
-      .getRange(2, 1, sheet.getLastRow() - 1, 5)
-      .getValues() as [Category, string, number, Date, Date | undefined][];
-    return values
-      .map(
-        ([category, title, amount, paymentDate, paymentPeriod]) =>
-          new Payment(title, amount, PaymentDate.from(category, paymentDate))
-      )
-      .filter((p) => p.paymentDate.isBetween(from, to));
+  private get isExpired(): boolean {
+    if (!this.end) {
+      return false;
+    }
+
+    return this.end <= new Date();
+  }
+
+  static from(row: RowType): Payment | undefined {
+    if (!row[INDEXES.timestamp]) {
+      return;
+    }
+
+    return new Payment(
+      row[INDEXES.timestamp],
+      row[INDEXES.category],
+      row[INDEXES.title],
+      parseInt(row[INDEXES.amount] + "", 10),
+      row[INDEXES.start],
+      row[INDEXES.end],
+      parseInt(row[INDEXES.repeatValue] + "", 10),
+      row[INDEXES.repeatUnit],
+      row[INDEXES.memo],
+      row[INDEXES.next]
+    );
+  }
+
+  updateNext(now = new Date()): void {
+    // 繰り返し終了
+    if (this.isExpired) {
+      this.next = undefined;
+      return;
+    }
+
+    const { start, repeatValue, repeatUnit } = this;
+    let { next } = this;
+    if (!next) {
+      next = new Date(start.getTime());
+    }
+    while (next < now) {
+      if (repeatUnit === REPEAT_UNIT.year) {
+        next.setFullYear(next.getFullYear() + repeatValue);
+      } else if (repeatUnit === REPEAT_UNIT.month) {
+        next.setMonth(next.getMonth() + repeatValue);
+      } else {
+        throw new Error(`Unexpected RepeatUnit -> ${repeatUnit}`);
+      }
+    }
+    this.next = next;
+  }
+
+  toRow(): RowType {
+    return [
+      this.timestamp,
+      this.category,
+      this.title,
+      this.amount,
+      this.start,
+      this.end,
+      this.repeatValue,
+      this.repeatUnit,
+      this.memo,
+      this.next,
+    ];
   }
 }
 
-export class PaymentDate {
-  static from(category: Category, value: any): Date {
-    const d = new Date(value);
-    if (isNaN(d.getTime())) {
-      throw new Error(`Invalid value ${JSON.stringify(value)}`);
-    }
-
-    const now = new Date();
-    if (category === Category.Yearly) {
-      d.setFullYear(now.getFullYear());
-    } else if (category === Category.Monthly) {
-      d.setFullYear(now.getFullYear(), now.getMonth());
-    }
-    return d;
+/**
+ * nextが空、過去の日付になっているものを設定する
+ * ソートしてきれいにする
+ */
+function refreshData(): void {
+  const sheet = _getDataSheet();
+  const lastRow = sheet.getLastRow() - 1;
+  if (lastRow < 1) {
+    return;
+  }
+  const payments = (sheet.getRange(2, 1, lastRow, 10).getValues() as RowType[])
+    .map((row) => Payment.from(row))
+    .filter(Boolean)
+    .map((payment) => {
+      payment!.updateNext();
+      return payment;
+    }) as Payment[];
+  sheet.deleteRows(2, lastRow);
+  if (payments.length) {
+    sheet.getRange(2, 1, payments.length, 10).setValues(payments.map((p) => p.toRow()));
   }
 }
 
@@ -70,7 +162,7 @@ function monthlyReport(): void {
   from.setHours(0, 0, 0, 0);
   const to = new Date(from.getTime());
   to.setMonth(to.getMonth() + 1);
-  const payments = Payment.get(from, to);
+  const payments = _getBetweenPayments(from, to);
   if (payments.length === 0) {
     Logger.log(`${from.toDateString()} ~ ${to.toDateString()}の支払いなし`);
     return;
@@ -83,7 +175,7 @@ function monthlyReport(): void {
     `内訳`,
     payments.map((p) => `${p.title}: ¥${p.amount}`).join("<br>"),
   ].join("<br>");
-  sendMail("[Monthly]支払い予定", message);
+  _sendMail("[Monthly]支払い予定", message);
 }
 
 function weeklyReport(): void {
@@ -91,7 +183,7 @@ function weeklyReport(): void {
   from.setHours(0, 0, 0, 0);
   const to = new Date(from.getTime());
   to.setDate(to.getDate() + 7);
-  const payments = Payment.get(from, to);
+  const payments = _getBetweenPayments(from, to);
   if (payments.length === 0) {
     Logger.log(`${from.toDateString()} ~ ${to.toDateString()}の支払いなし`);
     return;
@@ -104,10 +196,32 @@ function weeklyReport(): void {
     `内訳`,
     payments.map((p) => `${p.title}: ¥${p.amount}`).join("<br>"),
   ].join("<br>");
-  sendMail("[Weekly]支払い予定", message);
+  _sendMail("[Weekly]支払い予定", message);
 }
 
-function sendMail(subject: string, htmlBody: string): void {
+function _getDataSheet(): GoogleAppsScript.Spreadsheet.Sheet {
+  const sheets = SpreadsheetApp.openById(SHEET_ID!).getSheets();
+  const sheet = sheets.find((s) => s.getSheetName() === "data");
+  if (!sheet) {
+    throw new Error('Not Found "data" sheet');
+  }
+  return sheet;
+}
+
+function _getBetweenPayments(from: Date, to: Date): Payment[] {
+  const sheet = _getDataSheet();
+  const lastRow = sheet.getLastRow() - 1;
+  return (sheet.getRange(2, 1, lastRow, 10).getValues() as RowType[])
+    .map((row) => Payment.from(row))
+    .filter((payment) => {
+      if (!payment || !payment.next) {
+        return false;
+      }
+      return payment.next.isBetween(from, to);
+    }) as Payment[];
+}
+
+function _sendMail(subject: string, htmlBody: string): void {
   if (!MAIL_ADDRESS) {
     throw new Error('Requird property "MAIL_ADDRESS"');
   }
