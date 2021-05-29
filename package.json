@@ -5,7 +5,7 @@
   "scripts": {
     "build": "tsc",
     "postbuild": "replace --silent 'Object.defineProperty' 'var exports = {};\nObject.defineProperty' dist/index.js",
-    "push": "npm run build && clasp push",
+    "push": "npm run test && npm run build && clasp push",
     "create": "clasp create --type sheets --title \"PaymentReminder\" --parentId \"xx_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx_xxxxxxxx\" --rootDir ./dist",
     "test": "jest"
   },

@@ -167,15 +167,7 @@ function monthlyReport(): void {
     Logger.log(`${from.toDateString()} ~ ${to.toDateString()}の支払いなし`);
     return;
   }
-
-  const totalAmount = payments.reduce((sum, p) => sum + p.amount, 0);
-  const message = [
-    `${from.toDateString()} ~ ${to.toDateString()}の支払い金額: ¥${totalAmount}`,
-    ``,
-    `内訳`,
-    payments.map((p) => `${p.title}: ¥${p.amount}`).join("<br>"),
-  ].join("<br>");
-  _sendMail("[Monthly]支払い予定", message);
+  _sendMail("[Monthly]支払い予定", _createMessage(from, to, payments));
 }
 
 function weeklyReport(): void {
@@ -188,15 +180,59 @@ function weeklyReport(): void {
     Logger.log(`${from.toDateString()} ~ ${to.toDateString()}の支払いなし`);
     return;
   }
+  _sendMail("[Weekly]支払い予定", _createMessage(from, to, payments));
+}
 
-  const totalAmount = payments.reduce((sum, p) => sum + p.amount, 0);
-  const message = [
-    `${from.toDateString()} ~ ${to.toDateString()}の支払い金額: ¥${totalAmount}`,
-    ``,
-    `内訳`,
-    payments.map((p) => `${p.title}: ¥${p.amount}`).join("<br>"),
-  ].join("<br>");
-  _sendMail("[Weekly]支払い予定", message);
+function dailyReport(): void {
+  // 明日
+  const from = new Date();
+  from.setHours(0, 0, 0, 0);
+  from.setDate(from.getDate() + 1);
+  const to = new Date(from.getTime());
+  to.setDate(to.getDate() + 1);
+  const payments = _getBetweenPayments(from, to);
+  if (payments.length === 0) {
+    Logger.log(`${from.toDateString()} ~ ${to.toDateString()}の支払いなし`);
+    return;
+  }
+  _sendMail("[Daily]支払い予定", _createMessage(from, to, payments));
+}
+
+export function _createMessage(from: Date, to: Date, payments: Payment[]): string {
+  // 総額表示
+  let totalAmount = 0;
+  const totalByMethod: {[key: string]: number} = {};
+  const paymentsByMethod: {[key: string]: Payment[]} = {};
+  for (const p of payments) {
+    totalAmount += p.amount;
+    const key = p.memo || '未設定';
+    if (totalByMethod[key]) {
+      totalByMethod[key] += p.amount;
+    } else {
+      totalByMethod[key] = p.amount;
+    }
+    if (paymentsByMethod[key]) {
+      paymentsByMethod[key].push(p);
+    } else {
+      paymentsByMethod[key] = [p];
+    }
+  }
+  const header = `${from.toDateString()} ~ ${to.toDateString()}の支払い金額: ¥${totalAmount}`;
+  const details = Object.keys(paymentsByMethod).map(key => {
+    return (
+      `${key}: ¥${totalByMethod[key]}` +
+      "<br>" +
+      paymentsByMethod[key].map(p => `・${p.title}: ¥${p.amount}`).join("<br>")
+    )
+  }).join("<br><br>");
+
+  return [
+    `HEADER`,
+    '',
+    '内訳',
+    '',
+    'DETAILS'
+  ].join('<br>').replace('HEADER', header).replace('DETAILS', details);
 }
 
 function _getDataSheet(): GoogleAppsScript.Spreadsheet.Sheet {
